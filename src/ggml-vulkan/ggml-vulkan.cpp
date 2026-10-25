@@ -1,4 +1,6 @@
 #include "ggml-vulkan-common.h"
+#include "compression/smolv.h"
+#include "compression/lz4hc.h"
 
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
@@ -578,6 +580,40 @@ static void ggml_vk_create_pipeline_func(vk_device& device, vk_pipeline& pipelin
     GGML_ASSERT(parameter_count > 0);
     GGML_ASSERT(parameter_count <= MAX_PARAMETER_COUNT);
     GGML_ASSERT(wg_denoms[0] > 0 && wg_denoms[1] > 0 && wg_denoms[2] > 0); // NOLINT
+
+    uint64_t smolv_size = 0;
+    {
+        auto u8_data = reinterpret_cast<const uint8_t*>(spv_data);
+
+        smolv_size = uint64_t(u8_data[0])
+            | (uint64_t(u8_data[1]) << 8)
+            | (uint64_t(u8_data[2]) << 16)
+            | (uint64_t(u8_data[3]) << 24)
+            | (uint64_t(u8_data[4]) << 32)
+            | (uint64_t(u8_data[5]) << 40)
+            | (uint64_t(u8_data[6]) << 48)
+            | (uint64_t(u8_data[7]) << 56);
+
+        spv_data = u8_data + 8;
+        spv_size = spv_size - 8;
+
+        GGML_ASSERT(smolv_size > 0);
+    }
+
+    std::vector<char> real_spv_data;
+    {
+        // Decompression step
+        std::vector<char> data(smolv_size, '\0');
+        const auto size = LZ4_decompress_safe(reinterpret_cast<const char*>(spv_data), data.data(), spv_size, data.size());
+        GGML_ASSERT(size == smolv_size);
+        spv_size = smolv::GetDecodedBufferSize(data.data(), data.size());
+        GGML_ASSERT(spv_size > 0);
+        real_spv_data.resize(spv_size, '\0');
+        const auto smolv_success = smolv::Decode(data.data(), data.size(), real_spv_data.data(), real_spv_data.size());
+        GGML_ASSERT(smolv_success);
+        spv_data = real_spv_data.data();
+    }
+
 
     vk::ShaderModuleCreateInfo shader_module_create_info({}, spv_size, reinterpret_cast<const uint32_t *>(spv_data));
 

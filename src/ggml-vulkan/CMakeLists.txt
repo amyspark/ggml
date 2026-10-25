@@ -68,12 +68,25 @@ if (Vulkan_FOUND)
                              ggml-vulkan-buffers.cpp
                              ggml-vulkan-comm.cpp
                              ggml-vulkan-debug.cpp
+                             compression/lz4.h
+                             compression/lz4.c
+                             compression/lz4hc.h
+                             compression/lz4hc.c
+                             compression/smolv.h
+                             compression/smolv.cpp
                             )
 
     # hide symbols, so dlclosed duplicate copies cannot interpose them
     set_target_properties(ggml-vulkan PROPERTIES
                           CXX_VISIBILITY_PRESET hidden
                           VISIBILITY_INLINES_HIDDEN ON)
+
+    target_compile_features(ggml-vulkan PRIVATE cxx_std_17 c_std_17)
+
+    if (MSVC)
+        target_compile_options(ggml-vulkan PRIVATE "/Gy" "/Gw")
+        target_link_options(ggml-vulkan PRIVATE "/OPT:REF,ICF")
+    endif()
 
     set(VULKAN_SHADER_GEN_CMAKE_ARGS "")
 

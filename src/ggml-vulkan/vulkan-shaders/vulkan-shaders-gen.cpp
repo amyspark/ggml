@@ -1,5 +1,4 @@
 #include <iostream>
-#include <fstream>
 #include <sstream>
 #include <string>
 #include <stdexcept>
@@ -9,7 +8,7 @@
 #include <thread>
 #include <mutex>
 #include <future>
-#include <queue>
+#include <deque>
 #include <condition_variable>
 #include <atomic>
 #include <cstdio>
@@ -19,7 +18,6 @@
 #include <algorithm>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <filesystem>
 
 #ifdef _WIN32
     #define NOMINMAX
@@ -30,6 +28,9 @@
     #include <sys/wait.h>
     #include <fcntl.h>
 #endif
+
+#include "../compression/smolv.h"
+#include "../compression/lz4hc.h"
 
 #define ASYNCIO_CONCURRENCY 64
 
@@ -1268,14 +1269,43 @@ void write_output_files() {
         hdr << "extern const unsigned char " << name << "_data[];\n\n";
 
         if (input_filepath != "") {
-            std::string data = read_binary_file(path);
-            if (data.empty()) {
+            const std::string orig = read_binary_file(path);
+
+            if (orig.empty()) {
                 continue;
             }
 
-            src << "const uint64_t " << name << "_len = " << data.size() << ";\n";
-            src << "const unsigned char " << name << "_data[" << data.size() << "] = {\n" << std::hex;
-            auto bytes = reinterpret_cast<const uint8_t*>(data.data());
+            smolv::ByteArray buf;
+            smolv::Encode(orig.data(), orig.size(), buf, smolv::kEncodeFlagNone);
+
+            // compress data
+            const auto data_size = LZ4_compressBound(buf.size());
+            std::vector<char> data(data_size, '\0');
+            {
+                const auto total_out = LZ4_compress_HC(reinterpret_cast<const char*>(buf.data()), data.data(), buf.size(), data.size(), LZ4HC_CLEVEL_DEFAULT);
+                if (total_out == 0) {
+                    std::cerr << "Error while compressing with LZ4" << "\n";
+                    exit(EXIT_FAILURE);
+                }
+
+                data.resize(total_out);
+            }
+
+            const auto c_size = data.size() + sizeof(uint64_t);
+
+            src << "const uint64_t " << name << "_len = " << c_size << ";\n";
+            src << "const unsigned char " << name << "_data[" << c_size << "] = {\n" << std::hex;
+            // Length of SMOL-V compressed buffer
+            src 
+                << "\t0x" << ((buf.size() >> 0) & 0xFF) << ", "
+                << "0x" << ((buf.size() >> 8) & 0xFF) << ", "
+                << "0x" << ((buf.size() >> 16) & 0xFF) << ", "
+                << "0x" << ((buf.size() >> 24) & 0xFF) << ", "
+                << "0x" << ((buf.size() >> 32) & 0xFF) << ", "
+                << "0x" << ((buf.size() >> 40) & 0xFF) << ", "
+                << "0x" << ((buf.size() >> 48) & 0xFF) << ", "
+                << "0x" << ((buf.size() >> 56) & 0xFF) << ",\n";
+            const auto bytes = reinterpret_cast<const uint8_t*>(data.data());
             for (size_t i = 0; i < data.size(); ++i) {
                 src << "0x" << static_cast<int>(bytes[i]) << ",";
                 if ((i + 1) % 12 == 0) src << "\n";

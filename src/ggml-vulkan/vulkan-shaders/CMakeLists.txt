@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.19)
 project("vulkan-shaders-gen" C CXX)
 
+include(CheckLinkerFlag)
 find_package (Threads REQUIRED)
 
 if (GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
@@ -37,7 +38,15 @@ if (GGML_VULKAN_SHADER_DEBUG_INFO)
 endif()
 
 set(TARGET vulkan-shaders-gen)
-add_executable(${TARGET} vulkan-shaders-gen.cpp)
+add_executable(${TARGET} vulkan-shaders-gen.cpp ../compression/smolv.h ../compression/smolv.cpp ../compression/lz4.h ../compression/lz4.c ../compression/lz4hc.h ../compression/lz4hc.c)
 install(TARGETS ${TARGET} RUNTIME)
-target_compile_features(${TARGET} PRIVATE cxx_std_17)
+target_compile_features(${TARGET} PRIVATE cxx_std_17 c_std_17)
 target_link_libraries(vulkan-shaders-gen PUBLIC Threads::Threads)
+
+if (MSVC)
+    check_linker_flag(CXX "/Gy" SUPPORTS_COMDAT_LINKING)
+    if (SUPPORTS_COMDAT_LINKING)
+        target_link_options(vulkan-shaders-gen PRIVATE "/Gy")
+    endif()
+    target_link_options(vulkan-shaders-gen PRIVATE "/OPT:REF,ICF")
+endif()
