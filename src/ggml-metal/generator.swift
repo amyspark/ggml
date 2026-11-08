@@ -16,7 +16,6 @@
 //  ggml-metal-device.m accordingly if you change it.
 
 import Foundation
-import Compression
 
 func sanitizeForMacro(_ name: String) -> String {
     return name.map{ch in ch.isLetter || ch.isNumber ? ch.uppercased() : "_" }.joined()
@@ -46,28 +45,14 @@ guard let originalData = try? Data(contentsOf: inputURL) else {
 }
 
 let srcSize = originalData.count
-let algorithm = COMPRESSION_LZMA
-let dstSize = srcSize * 2
-
-let dstBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: dstSize)
-defer { dstBuffer.deallocate() }
-
-let compressedSize = originalData.withUnsafeBytes { (srcPtr: UnsafeRawBufferPointer) -> Int in
-    guard let srcBase = srcPtr.bindMemory(to: UInt8.self).baseAddress else { return 0 }
-    return compression_encode_buffer(dstBuffer,
-                                     dstSize,
-                                     srcBase,
-                                     srcSize,
-                                     nil,
-                                     algorithm)
-}
-
-guard compressedSize > 0 else {
-    fputs("Error: compression failed.\n", stderr)
+let compressedData: NSData;
+do {
+    compressedData = try (originalData as NSData).compressed(using: .lzma)
+} catch {
+    fputs("Error: compression failed: \(error)\n", stderr)
     exit(1)
 }
-
-let compressedData = Data(bytes: dstBuffer, count: compressedSize)
+let compressedSize = compressedData.count
 
 let macroName      = sanitizeForMacro(outfile) + "_H"
 let identifierBase = sanitizeForIdentifier(outfile)
