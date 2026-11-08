@@ -144,22 +144,7 @@ if (GGML_METAL_EMBED_LIBRARY)
 
     target_sources(ggml-metal PRIVATE ${METALLIB_EMBED_ASM_FILES})
 else()
-    # copy header files to bin directory
-    configure_file(../ggml-common.h  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ggml-common.h     COPYONLY)
-    configure_file(ggml-metal-impl.h ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ggml-metal-impl.h COPYONLY)
-
-    file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels")
-    configure_file(kernels/common.h     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/common.h     COPYONLY)
-    configure_file(kernels/dequantize.h ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/dequantize.h COPYONLY)
-    configure_file(kernels/quantize.h   ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/quantize.h   COPYONLY)
-    foreach(hdr ${METALLIB_KERNELS_FA_SHARED})
-        get_filename_component(hdr_name ${hdr} NAME)
-        configure_file(${hdr} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/${hdr_name} COPYONLY)
-    endforeach()
-
-    foreach(src ${METALLIB_KERNEL_SOURCES})
-        configure_file(${src} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${src} COPYONLY)
-    endforeach()
+    find_library(Compression_LIB NAMES compression REQUIRED)
 
     # CMAKE_OSX_SYSROOT is an SDK name or path - xcrun accepts both
     set(METAL_SDK ${CMAKE_OSX_SYSROOT})
@@ -176,8 +161,6 @@ else()
     if (GGML_METAL_SHADER_DEBUG)
         # note: disabling fast math is needed in order to pass tests/test-backend-ops
         # note: adding -fno-inline fixes the tests when using MTL_SHADER_VALIDATION=1
-        # note: unfortunately, we have to call it default.metallib instead of ggml.metallib
-        #       ref: https://github.com/ggml-org/whisper.cpp/issues/1720
         # note: adding -g causes segmentation fault during compile
         set(XC_FLAGS -fno-fast-math -fno-inline)
     else()
@@ -204,80 +187,110 @@ else()
         list   (APPEND XC_FLAGS -std=${GGML_METAL_STD})
     endif()
 
-    # Compile each kernel source to .air, then link into default.metallib
+    # Compile each kernel source to .air, then link into ggml.metallib
     set(AIR_FILES "")
     foreach(src ${METALLIB_KERNEL_SOURCES})
         get_filename_component(name ${src} NAME_WE)
-        set(AIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${name}.air")
+        set(AIR "${CMAKE_CURRENT_BINARY_DIR}/${name}.air")
         list(APPEND AIR_FILES ${AIR})
         add_custom_command(
             OUTPUT ${AIR}
-            COMMAND xcrun -sdk ${METAL_SDK} metal ${XC_FLAGS} -I ${CMAKE_RUNTIME_OUTPUT_DIRECTORY} -c ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${src} -o ${AIR}
+            COMMAND xcrun -sdk ${METAL_SDK} metal
+                ${XC_FLAGS}
+                -I ${CMAKE_CURRENT_SOURCE_DIR}
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/../"
+                -c "${CMAKE_CURRENT_SOURCE_DIR}/${src}"
+                -o ${AIR}
             DEPENDS ${src} ${METALLIB_KERNELS_FA_SHARED} kernels/common.h kernels/dequantize.h kernels/quantize.h ${METALLIB_COMMON} ggml-metal-impl.h
             COMMENT "Compiling ${src}"
             VERBATIM
         )
     endforeach()
 
-    set(METALLIB_FILES ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib)
-
     # the tensor API kernels go in a separate metallib, loaded only where supported
     if (GGML_METAL_HAS_TENSOR_LIB)
-        set(AIR_MM_TENSOR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/mul_mm_tensor.air")
+        set(AIR_MM_TENSOR "${CMAKE_CURRENT_BINARY_DIR}/mul_mm_tensor.air")
         # the tensor API needs OS 26+
         set(XC_FLAGS_TENSOR ${XC_FLAGS} -mtargetos=${GGML_METAL_TARGET_OS}26.0${METAL_TARGET_SIM})
         add_custom_command(
             OUTPUT ${AIR_MM_TENSOR}
-            COMMAND xcrun -sdk ${METAL_SDK} metal ${XC_FLAGS_TENSOR} -DGGML_METAL_HAS_TENSOR -I ${CMAKE_RUNTIME_OUTPUT_DIRECTORY} -c ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/mul_mm.metal -o ${AIR_MM_TENSOR}
+            COMMAND xcrun -sdk ${METAL_SDK} metal
+                ${XC_FLAGS_TENSOR}
+                -DGGML_METAL_HAS_TENSOR
+                -I ${CMAKE_CURRENT_SOURCE_DIR}
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/../"
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/kernels/mul_mm.metal
+                -o ${AIR_MM_TENSOR}
             DEPENDS kernels/mul_mm.metal kernels/common.h kernels/dequantize.h ${METALLIB_COMMON} ggml-metal-impl.h
             COMMENT "Compiling kernels/mul_mm.metal (tensor API)"
             VERBATIM
         )
 
-        set(AIR_FA_TENSOR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fa_tensor_tensor.air")
+        set(AIR_FA_TENSOR "${CMAKE_CURRENT_BINARY_DIR}/fa_tensor_tensor.air")
         add_custom_command(
             OUTPUT ${AIR_FA_TENSOR}
-            COMMAND xcrun -sdk ${METAL_SDK} metal ${XC_FLAGS_TENSOR} -DGGML_METAL_HAS_TENSOR -I ${CMAKE_RUNTIME_OUTPUT_DIRECTORY} -c ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/fa_tensor.metal -o ${AIR_FA_TENSOR}
+            COMMAND xcrun -sdk ${METAL_SDK} metal
+                ${XC_FLAGS_TENSOR}
+                -DGGML_METAL_HAS_TENSOR
+                -I ${CMAKE_CURRENT_SOURCE_DIR}
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/kernels/fa_tensor.metal
+                -o ${AIR_FA_TENSOR}
             DEPENDS kernels/fa_tensor.metal kernels/common.h ${METALLIB_COMMON} ggml-metal-impl.h
             COMMENT "Compiling kernels/fa_tensor.metal (tensor API)"
             VERBATIM
         )
 
         add_custom_command(
-            OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ggml-tensor.metallib
-            COMMAND xcrun -sdk ${METAL_SDK} metallib ${AIR_MM_TENSOR} ${AIR_FA_TENSOR} -o ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ggml-tensor.metallib
-            DEPENDS ${AIR_MM_TENSOR} ${AIR_FA_TENSOR}
+            OUTPUT
+                ${CMAKE_CURRENT_BINARY_DIR}/ggml-tensor.h
+                ${CMAKE_CURRENT_BINARY_DIR}/ggml-tensor.c
+            COMMAND xcrun -sdk ${METAL_SDK} metallib
+                ${AIR_MM_TENSOR} ${AIR_FA_TENSOR}
+                -o ${CMAKE_CURRENT_BINARY_DIR}/ggml-tensor.metallib
+            COMMAND xcrun -sdk ${METAL_SDK} swift
+                ${CMAKE_CURRENT_SOURCE_DIR}/generator.swift
+                ${CMAKE_CURRENT_BINARY_DIR}/ggml-tensor.metallib
+                ggml-tensor
+            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+            DEPENDS ${AIR_MM_TENSOR} ${AIR_FA_TENSOR} ${CMAKE_CURRENT_SOURCE_DIR}/generator.swift
             COMMENT "Linking tensor API Metal kernels into ggml-tensor.metallib"
         )
-
-        list(APPEND METALLIB_FILES ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ggml-tensor.metallib)
     endif()
 
     add_custom_command(
-        OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib
-        COMMAND xcrun -sdk ${METAL_SDK} metallib ${AIR_FILES} -o ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib
-        COMMAND rm -f ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ggml-common.h
-        COMMAND rm -f ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ggml-metal-impl.h
-        COMMAND rm -rf ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels
-        DEPENDS ${AIR_FILES} ${AIR_MM_TENSOR} ${AIR_FA_TENSOR}
-        COMMENT "Linking Metal kernels into default.metallib"
+        OUTPUT
+            ${CMAKE_CURRENT_BINARY_DIR}/ggml-metallib.h
+            ${CMAKE_CURRENT_BINARY_DIR}/ggml-metallib.c
+        COMMAND xcrun -sdk ${METAL_SDK} metallib
+            ${AIR_FILES}
+            -o ${CMAKE_CURRENT_BINARY_DIR}/ggml.metallib
+        COMMAND xcrun -sdk ${METAL_SDK} swift
+            ${CMAKE_CURRENT_SOURCE_DIR}/generator.swift
+            ${CMAKE_CURRENT_BINARY_DIR}/ggml.metallib
+            ggml-metallib
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+        DEPENDS ${AIR_FILES} ${AIR_MM_TENSOR} ${AIR_FA_TENSOR} ${CMAKE_CURRENT_SOURCE_DIR}/generator.swift
+        COMMENT "Linking Metal kernels into ggml.metallib"
     )
 
-    add_custom_target(
-        ggml-metal-lib ALL
-        DEPENDS ${METALLIB_FILES}
+    target_sources(ggml-metal PRIVATE 
+        "${CMAKE_CURRENT_BINARY_DIR}/ggml-metallib.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/ggml-metallib.c"
     )
-endif() # GGML_METAL_EMBED_LIBRARY
-
-if (NOT GGML_METAL_EMBED_LIBRARY)
-    install(
-        DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/kernels/
-        DESTINATION ${CMAKE_INSTALL_BINDIR}/kernels
-        FILES_MATCHING PATTERN "*.metal" PATTERN "*.h"
+    target_include_directories(
+        ggml-metal PRIVATE "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+    target_link_libraries(
+        ggml-metal PRIVATE "${Compression_LIB}"
     )
 
-    install(
-        FILES ${METALLIB_FILES}
-        DESTINATION ${CMAKE_INSTALL_BINDIR}
-    )
+    if (GGML_METAL_HAS_TENSOR_LIB)
+        target_sources(ggml-metal PRIVATE
+            "${CMAKE_CURRENT_BINARY_DIR}/ggml-tensor.h"
+            "${CMAKE_CURRENT_BINARY_DIR}/ggml-tensor.c"
+        )
+        target_compile_definitions(
+            ggml-metal PRIVATE "GGML_METAL_HAS_TENSOR_LIB=1"
+        )
+    endif()
 endif()
