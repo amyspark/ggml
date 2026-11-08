@@ -76,8 +76,6 @@ set(METALLIB_KERNEL_SOURCES
 )
 
 if (GGML_METAL_EMBED_LIBRARY)
-    find_library(Compression_LIB NAMES compression REQUIRED)
-
     # CMAKE_OSX_SYSROOT is an SDK name or path - xcrun accepts both
     set(METAL_SDK ${CMAKE_OSX_SYSROOT})
     if (NOT METAL_SDK)
@@ -211,9 +209,6 @@ if (GGML_METAL_EMBED_LIBRARY)
     )
     target_include_directories(
         ggml-metal PRIVATE "${CMAKE_CURRENT_BINARY_DIR}"
-    )
-    target_link_libraries(
-        ggml-metal PRIVATE "${Compression_LIB}"
     )
 
     if (GGML_METAL_HAS_TENSOR_LIB)

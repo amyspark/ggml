@@ -13,7 +13,6 @@
 
 #include <Foundation/Foundation.h>
 #include <dispatch/dispatch.h>
-#include <compression.h>
 #include <Metal/Metal.h>
 
 #include <stdatomic.h>
@@ -465,26 +464,20 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
 
     return res;
 #else
-#ifdef SWIFT_PACKAGE
-    NSBundle * bundle = SWIFTPM_MODULE_BUNDLE;
-#else
-    NSBundle * bundle = [NSBundle bundleForClass:[GGMLMetalClass class]];
-#endif
-
     const int64_t t_start = ggml_time_us();
 
     NSError * error = nil;
 
     {
-        void *dst = malloc(ggml_metallib_orig_len);
-        // pre-compiled embedded library
-        size_t decompressed_length = compression_decode_buffer(dst, ggml_metallib_orig_len, ggml_metallib_data, ggml_metallib_data_len, NULL, COMPRESSION_LZMA);
-        if (decompressed_length != ggml_metallib_orig_len) {
-            GGML_LOG_ERROR("%s: failed decompression\n", __func__);
+        NSData *src = [[NSData alloc] initWithBytes:ggml_metallib_data length:ggml_metallib_data_len];
+        NSData *dst = [src decompressedDataUsingAlgorithm:NSDataCompressionAlgorithmLZMA error:&error];
+        if (!dst) {
+            GGML_LOG_ERROR("%s: failed decompression: %s\n", __func__, [[error description] UTF8String]);
             ggml_metal_library_free(res);
             return NULL;
         }
-        dispatch_data_t data = dispatch_data_create(dst, ggml_metallib_orig_len, nil, DISPATCH_DATA_DESTRUCTOR_FREE);
+        dispatch_data_t data = dispatch_data_create([dst bytes], [dst length], nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        src = NULL;
         dst = NULL;
         GGML_LOG_INFO("%s: loading decompressed metallib from embedded\n", __func__);
 
@@ -501,16 +494,17 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
         if (ggml_metal_device_get_props(dev)->has_tensor) {
             id<MTLLibrary> lib_mm = nil;
             {
-                dst = malloc(ggml_tensor_orig_len);
-                decompressed_length = compression_decode_buffer(dst, ggml_tensor_orig_len, ggml_tensor_data, ggml_tensor_data_len, NULL, COMPRESSION_LZMA);
-                if (decompressed_length != ggml_metallib_orig_len) {
-                    GGML_LOG_ERROR("%s: failed decompression\n", __func__);
+                src = [[NSData alloc] initWithBytes:ggml_tensor_data length:ggml_tensor_data_len];
+                dst = [src decompressedDataUsingAlgorithm:NSDataCompressionAlgorithmLZMA error:&error];
+                if (!dst) {
+                    GGML_LOG_ERROR("%s: failed decompression: %s\n", __func__, [[error description] UTF8String]);
                     ggml_metal_library_free(res);
                     return NULL;
                 }
-                data = dispatch_data_create(dst, ggml_tensor_orig_len, nil, DISPATCH_DATA_DESTRUCTOR_FREE);
+                data = dispatch_data_create([dst bytes], [dst length], nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+                src = NULL;
                 dst = NULL;
-                lib_mm = [device newLibraryWithData:dst error:&error];
+                lib_mm = [device newLibraryWithData:data error:&error];
                 if (!lib_mm && error) {
                     GGML_LOG_ERROR("%s: %s\n", __func__, [[error description] UTF8String]);
                 }
