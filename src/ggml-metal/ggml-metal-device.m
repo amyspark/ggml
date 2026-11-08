@@ -6,8 +6,14 @@
 #import "ggml-metal-impl.h"
 #import "ggml-metal-common.h"
 
-#include <Foundation/Foundation.h>
+#include "ggml-metallib.h"
+#ifdef GGML_METAL_HAS_TENSOR_LIB
+#include "ggml-tensor.h"
+#endif
 
+#include <Foundation/Foundation.h>
+#include <dispatch/dispatch.h>
+#include <compression.h>
 #include <Metal/Metal.h>
 
 #include <stdatomic.h>
@@ -405,46 +411,6 @@ static bool ggml_metal_library_compile_all(
     return ok;
 }
 
-// look for <name>.metallib as a bundle resource, then next to the running binary
-static NSString * ggml_metal_find_metallib(NSBundle * bundle, NSString * name) {
-    NSError * error = nil;
-
-    NSString * path_lib = [bundle pathForResource:name ofType:@"metallib"];
-    if (path_lib == nil) {
-        // Try to find the resource in the directory where the current binary located.
-        NSString * bin_cur = [[NSProcessInfo processInfo] arguments][0];
-        NSString * bin_dir = [bin_cur stringByDeletingLastPathComponent];
-
-        NSString * path_lib_default = [NSString pathWithComponents:@[bin_dir, [name stringByAppendingPathExtension:@"metallib"]]];
-        if ([[NSFileManager defaultManager] isReadableFileAtPath:path_lib_default]) {
-            GGML_LOG_INFO("%s: found '%s'\n", __func__, [path_lib_default UTF8String]);
-
-            NSDictionary * atts = [[NSFileManager defaultManager] attributesOfItemAtPath:path_lib_default error:&error];
-            if (atts && atts[NSFileType] == NSFileTypeSymbolicLink) {
-                // Optionally, if this is a symlink, try to resolve it.
-                path_lib_default = [[NSFileManager defaultManager] destinationOfSymbolicLinkAtPath:path_lib_default error:&error];
-                if (path_lib_default && [path_lib_default length] > 0 && ![[path_lib_default substringToIndex:1] isEqualToString:@"/"]) {
-                    // It is a relative path, adding the binary directory as directory prefix.
-                    path_lib_default = [NSString pathWithComponents:@[bin_dir, path_lib_default]];
-                }
-                if (!path_lib_default || ![[NSFileManager defaultManager] isReadableFileAtPath:path_lib_default]) {
-                    // Link to the resource could not be resolved.
-                    path_lib_default = nil;
-                } else {
-                    GGML_LOG_INFO("%s: symlink resolved '%s'\n", __func__, [path_lib_default UTF8String]);
-                }
-            }
-        } else {
-            // The resource couldn't be found in the binary's directory.
-            path_lib_default = nil;
-        }
-
-        path_lib = path_lib_default;
-    }
-
-    return path_lib;
-}
-
 ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
     id<MTLDevice> device = ggml_metal_device_get_obj(dev);
 
@@ -508,14 +474,21 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
     const int64_t t_start = ggml_time_us();
 
     NSError * error = nil;
-    NSString * path_lib = ggml_metal_find_metallib(bundle, @"default");
 
-    if (path_lib != nil) {
-        // pre-compiled library found: a single combined default.metallib
-        NSURL * libURL = [NSURL fileURLWithPath:path_lib];
-        GGML_LOG_INFO("%s: loading '%s'\n", __func__, [path_lib UTF8String]);
+    {
+        void *dst = malloc(ggml_metallib_orig_len);
+        // pre-compiled embedded library
+        size_t decompressed_length = compression_decode_buffer(dst, ggml_metallib_orig_len, ggml_metallib_data, ggml_metallib_data_len, NULL, COMPRESSION_LZMA);
+        if (decompressed_length != ggml_metallib_orig_len) {
+            GGML_LOG_ERROR("%s: failed decompression\n", __func__);
+            ggml_metal_library_free(res);
+            return NULL;
+        }
+        dispatch_data_t data = dispatch_data_create(dst, ggml_metallib_orig_len, nil, DISPATCH_DATA_DESTRUCTOR_FREE);
+        dst = NULL;
+        GGML_LOG_INFO("%s: loading decompressed metallib from embedded\n", __func__);
 
-        res->objs[0]        = [device newLibraryWithURL:libURL error:&error];
+        res->objs[0]        = [device newLibraryWithData:data error:&error];
         res->single_library = true;
         if (!res->objs[0]) {
             GGML_LOG_ERROR("%s: error: %s\n", __func__, [[error description] UTF8String]);
@@ -524,19 +497,27 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
         }
 
         // the tensor API kernels are built into a separate metallib
+#ifdef GGML_METAL_HAS_TENSOR_LIB
         if (ggml_metal_device_get_props(dev)->has_tensor) {
-            NSString * path_mm = ggml_metal_find_metallib(bundle, @"ggml-tensor");
-
             id<MTLLibrary> lib_mm = nil;
-            if (path_mm != nil) {
-                lib_mm = [device newLibraryWithURL:[NSURL fileURLWithPath:path_mm] error:&error];
+            {
+                dst = malloc(ggml_tensor_orig_len);
+                decompressed_length = compression_decode_buffer(dst, ggml_tensor_orig_len, ggml_tensor_data, ggml_tensor_data_len, NULL, COMPRESSION_LZMA);
+                if (decompressed_length != ggml_metallib_orig_len) {
+                    GGML_LOG_ERROR("%s: failed decompression\n", __func__);
+                    ggml_metal_library_free(res);
+                    return NULL;
+                }
+                data = dispatch_data_create(dst, ggml_tensor_orig_len, nil, DISPATCH_DATA_DESTRUCTOR_FREE);
+                dst = NULL;
+                lib_mm = [device newLibraryWithData:dst error:&error];
                 if (!lib_mm && error) {
                     GGML_LOG_ERROR("%s: %s\n", __func__, [[error description] UTF8String]);
                 }
             }
 
             if (lib_mm) {
-                GGML_LOG_INFO("%s: loaded '%s'\n", __func__, [path_mm UTF8String]);
+                GGML_LOG_INFO("%s: loaded tensor from embedded\n", __func__);
 
                 res->objs[GGML_METAL_LIB_MUL_MM] = [lib_mm retain];
                 res->override_fns                = [[NSSet setWithArray:[lib_mm functionNames]] retain];
@@ -546,58 +527,11 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
                 ggml_metal_device_disable_tensor(dev);
             }
         }
+#endif
 
         GGML_LOG_INFO("%s: loaded in %.3f sec\n", __func__, (ggml_time_us() - t_start) / 1e6);
         return res;
     }
-
-    // no pre-compiled metallib: fall back to compiling each kernel source separately
-    GGML_LOG_INFO("%s: default.metallib not found, loading kernel sources\n", __func__);
-
-    NSString * path_resource = [[NSProcessInfo processInfo].environment objectForKey:@"GGML_METAL_PATH_RESOURCES"];
-    if (path_resource) {
-        GGML_LOG_INFO("%s: GGML_METAL_PATH_RESOURCES = %s\n", __func__, [path_resource UTF8String]);
-    }
-
-    // resolve each kind's source path up front (file lookup/logging stays on the calling thread)
-    NSString ** path_per_kind = calloc(GGML_METAL_LIB_COUNT, sizeof(NSString *));
-    for (int kind = 0; kind < GGML_METAL_LIB_COUNT; ++kind) {
-        NSString * rel = [NSString stringWithFormat:@"kernels/%s.metal", k_lib_names[kind]];
-
-        NSString * path_source = nil;
-        if (path_resource) {
-            path_source = [path_resource stringByAppendingPathComponent:rel];
-        } else {
-            NSString * stem = [NSString stringWithFormat:@"kernels/%s", k_lib_names[kind]];
-            path_source = [bundle pathForResource:stem ofType:@"metal"];
-        }
-
-        if (path_source == nil || ![[NSFileManager defaultManager] isReadableFileAtPath:path_source]) {
-            GGML_LOG_WARN("%s: could not locate %s in bundle, falling back to cwd\n", __func__, [rel UTF8String]);
-            path_source = rel;
-        }
-
-        GGML_LOG_DEBUG("%s: loading '%s'\n", __func__, [path_source UTF8String]);
-
-        path_per_kind[kind] = [path_source retain];
-    }
-
-    const bool ok = ggml_metal_library_compile_all(res, device, prep,
-        ^NSString * (int kind, NSError ** err) {
-            return ggml_metal_library_flatten_source(path_per_kind[kind], err);
-        }, "source");
-
-    for (int kind = 0; kind < GGML_METAL_LIB_COUNT; ++kind) {
-        [path_per_kind[kind] release];
-    }
-    free(path_per_kind);
-
-    if (!ok) {
-        ggml_metal_library_free(res);
-        return NULL;
-    }
-
-    return res;
 #endif
 }
 
