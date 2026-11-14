@@ -419,6 +419,11 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
             endif()
             ggml_add_cpu_backend_features(${GGML_CPU_NAME} x86 ${ARCH_DEFINITIONS})
         endif()
+
+        if (CMAKE_C_COMPILER_ID STREQUAL "Clang")
+            # https://github.com/llvm/llvm-project/issues/173168
+            list(APPEND ARCH_FLAGS -Wno-error=incompatible-pointer-types)
+        endif()
     elseif (GGML_SYSTEM_ARCH STREQUAL "PowerPC")
         message(STATUS "PowerPC detected")
         list(APPEND GGML_CPU_SOURCES ggml-cpu/arch/powerpc/quants.c)
